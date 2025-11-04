@@ -3,7 +3,6 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 class TestTextExtractor(unittest.TestCase):
-
     def test_extract_text_from_docx(self):
         # Mock docx object and paragraphs
         mock_doc = MagicMock()

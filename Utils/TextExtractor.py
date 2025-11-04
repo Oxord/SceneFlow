@@ -4,12 +4,10 @@ import chardet
 import re
 
 class TextExtractor:
-    """Класс для извлечения текста из DOCX и PDF файлов"""
     def __init__(self, filepath):
         self.filepath = filepath
 
     def extract_text_from_docx(self):
-        """Извлечение текста из DOCX файла"""
         doc = docx.Document(self.filepath)
         full_text = []
         for para in doc.paragraphs:
@@ -17,7 +15,6 @@ class TextExtractor:
         return '\n'.join(full_text)
 
     def extract_text_from_pdf(self):
-        """Извлечение текста из PDF файла"""
         reader = PdfReader(self.filepath)
         full_text = []
         for page in reader.pages:
@@ -25,7 +22,6 @@ class TextExtractor:
         return '\n'.join(full_text)
 
     def preprocess_text(self, raw_text):
-        """Предварительная обработка текста"""
         # Определение кодировки (если текст поступает в байтах)
         if isinstance(raw_text, bytes):
             result = chardet.detect(raw_text)
@@ -56,14 +52,12 @@ class TextExtractor:
             # Убираем лишние пробельные символы внутри абзаца, но сохраняем одиночные пробелы
             cleaned_paragraph = re.sub(r'[ \t]+', ' ', paragraph)  # Множественные пробелы -> одиночные
             cleaned_paragraph = cleaned_paragraph.strip()  # Убираем пробелы по краям
-            if cleaned_paragraph:  # Добавляем только непустые абзацы
+            if cleaned_paragraph:
                 processed_paragraphs.append(cleaned_paragraph)
-        # Объединяем абзацы с двойным переносом строки
         result = '\n\n'.join(processed_paragraphs)
         return result
 
     def parse_script(self):
-        """Основной метод для парсинга скрипта"""
         if self.filepath.endswith('.docx'):
             raw_text = self.extract_text_from_docx()
         elif self.filepath.endswith('.pdf'):
