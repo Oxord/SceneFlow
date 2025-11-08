@@ -1,6 +1,7 @@
 ﻿namespace API.Controllers
 {
     using Domain.Models;
+    using Infrastructure.RabbitMQ;
     using Microsoft.AspNetCore.Mvc;
 
     [ApiController]
@@ -23,6 +24,9 @@
                 var fileContent = memoryStream.ToArray();
                 var fileStorage = new FileStorage( file.FileName, file.Length, fileContent );
                 _fileStorageList.Add( fileStorage ); // Сохраняем файл в списке
+
+                var rabbitMQPublisher = new RabbitMQPublisher();
+                rabbitMQPublisher.Publish();
 
                 return Ok( new { fileStorage.FileName, fileStorage.FileSize } );
             }

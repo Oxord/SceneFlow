@@ -6,7 +6,7 @@ public class FileStorage
     public long FileSize { get; set; }
     public byte[] FileContent { get; set; }
 
-    public FileStorage(string fileName, long fileSize, byte[] fileContent)
+    public FileStorage( string fileName, long fileSize, byte[] fileContent )
     {
         FileName = fileName;
         FileSize = fileSize;
