@@ -1,0 +1,230 @@
+import pika
+import json
+import requests
+import os
+import logging
+import time
+import io
+from urllib.parse import urlparse
+
+from NNApi.Configurtaion.ConfigManager import ConfigManager
+from NNApi.Services.DocumentProcessor import DocumentProcessor
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class ScenarioProcessorService:
+    """
+    Микросервис-consumer для RabbitMQ, который скачивает файлы по URL,
+    обрабатывает их на сцены с помощью LLM и логирует результаты.
+    """
+
+    def __init__(self, config_manager: ConfigManager):
+        self.config = config_manager
+        self.rabbitmq_host = self.config.get("RabbitMQ", "Host")
+        self.rabbitmq_port = self.config.get("RabbitMQ", "Port")
+        self.queue_name = self.config.get("RabbitMQ", "QueueName")
+        self.rabbitmq_username = self.config.get("RabbitMQ", "Username")
+        self.rabbitmq_password = self.config.get("RabbitMQ", "Password")
+        self.rabbitmq_vhost = self.config.get("RabbitMQ", "VirtualHost")
+        if self.rabbitmq_vhost is None:
+            logger.warning("RabbitMQ.VirtualHost not found in config, using default '/'")
+            self.rabbitmq_vhost = "/"
+
+        # Параметры Ollama
+        self.ollama_model_name = self.config.get("Ollama", "ModelName")
+        self.ollama_host = self.config.get("Ollama", "Host", fallback="http://localhost:11434")
+
+        # Параметры скачивания
+        self.download_timeout = self.config.get("FileDownload", "TimeoutSeconds")
+        self.download_chunk_size = self.config.get("FileDownload", "ChunkSizeKB") * 1024  # Конвертируем KB в байты
+
+        if not all([self.rabbitmq_host, self.rabbitmq_port, self.queue_name,
+                    self.rabbitmq_username, self.rabbitmq_password, self.rabbitmq_vhost,
+                    self.ollama_model_name]):
+            raise ValueError(
+                "Missing critical configuration parameters. Check appsettings.json for RabbitMQ and Ollama.")
+
+        self.connection = None
+        self.channel = None
+
+        # Инициализируем DocumentProcessor
+        self.document_processor = DocumentProcessor(self.ollama_model_name, self.ollama_host)
+
+        logger.info(f"ScenarioProcessorService initialized. Queue: '{self.queue_name}'")
+        logger.debug(f"Full config: {self.config.get_all()}")
+
+    def _connect_to_rabbitmq(self):
+        """Устанавливает соединение с RabbitMQ."""
+        while True:
+            try:
+                logger.info(f"Attempting to connect to RabbitMQ at {self.rabbitmq_host}:{self.rabbitmq_port}...")
+                credentials = pika.PlainCredentials(self.rabbitmq_username, self.rabbitmq_password)
+                self.connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        host=self.rabbitmq_host,
+                        port=self.rabbitmq_port,
+                        credentials=credentials,
+                        virtual_host=self.rabbitmq_vhost
+                    )
+                )
+                self.channel = self.connection.channel()
+                self.channel.queue_declare(
+                    queue=self.queue_name,
+                    durable=True,
+                    arguments={'x-queue-type': 'quorum'}
+                )
+                logger.info("Successfully connected to RabbitMQ and declared queue.")
+                break
+            except pika.exceptions.AMQPConnectionError as e:
+                logger.error(f"Failed to connect to RabbitMQ: {e}. Retrying in 5 seconds...")
+                time.sleep(5)
+            except Exception as e:
+                logger.error(
+                    f"An unexpected error occurred while connecting to RabbitMQ: {e}. Retrying in 5 seconds...")
+                time.sleep(5)
+
+    def _fetch_file_content_in_memory(self, url: str, correlation_id: str) -> bytes | None:
+        """
+        Скачивает файл по заданному URL и возвращает его содержимое в виде байтов.
+        Не сохраняет файл на диск.
+        """
+        try:
+            parsed_url = urlparse(url)
+            if not all([parsed_url.scheme, parsed_url.netloc]):
+                logger.error(f"Invalid URL '{url}' (CorrelationId: {correlation_id})")
+                return None
+            logger.info(f"Fetching content from '{url}' (CorrelationId: {correlation_id})")
+
+            # Используем stream=True для обработки больших файлов без загрузки всего в память сразу
+            with requests.get(url, stream=True, timeout=self.download_timeout) as r:
+                r.raise_for_status()  # Вызовет исключение для ошибок HTTP (4xx, 5xx)
+
+                # Собираем чанки в BytesIO буфер
+                buffer = io.BytesIO()
+                for chunk in r.iter_content(chunk_size=self.download_chunk_size):
+                    if chunk:
+                        buffer.write(chunk)
+
+                logger.info(
+                    f"Successfully fetched content from '{url}' (CorrelationId: {correlation_id}). Size: {buffer.tell()} bytes.")
+                return buffer.getvalue()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching file from '{url}': {e} (CorrelationId: {correlation_id})")
+            return None
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during file fetch: {e} (CorrelationId: {correlation_id})")
+            return None
+
+    def _on_message_callback(self, ch, method, properties, body):
+        """
+        Коллбэк-функция, вызываемая при получении нового сообщения.
+        """
+        logger.info(f"Received message with delivery tag: {method.delivery_tag}")
+        correlation_id = "N/A"  # Инициализация для случая ошибки до извлечения CorrelationId
+        try:
+            message_data = json.loads(body)
+            file_name = message_data.get("FileName")
+            storage_url = message_data.get("StorageUrl")
+            file_type = message_data.get("FileType")  # Ожидаем тип файла: 'docx' или 'pdf'
+            correlation_id = message_data.get("CorrelationId", "N/A")
+
+            logger.info(f"Processing CorrelationId: {correlation_id}")
+
+            if not all([file_name, storage_url, file_type]):
+                logger.error(f"Message missing 'FileName', 'StorageUrl', or 'FileType'. Body: {body.decode()}")
+                ch.basic_ack(method.delivery_tag)
+                return
+
+            # Проверяем поддерживаемый тип файла
+            if file_type.lower() not in ["docx", "pdf"]:
+                logger.error(
+                    f"Unsupported FileType '{file_type}' for '{file_name}' (CorrelationId: {correlation_id}). Message will be acknowledged.")
+                ch.basic_ack(method.delivery_tag)
+                return
+
+            # 1. Скачиваем содержимое файла в память
+            file_content_bytes = self._fetch_file_content_in_memory(storage_url, correlation_id)
+
+            if file_content_bytes is None:
+                logger.warning(
+                    f"Failed to fetch content for '{file_name}' (CorrelationId: {correlation_id}). Message will be re-queued.")
+                ch.basic_nack(method.delivery_tag, requeue=True)
+                return
+
+            # 2. Обрабатываем документ с помощью DocumentProcessor
+            logger.info(f"Starting scene processing for '{file_name}' (CorrelationId: {correlation_id})...")
+            processed_scenes = self.document_processor.process_document(file_content_bytes, file_type.lower())
+
+            if processed_scenes:
+                logger.info(
+                    f"Successfully processed {len(processed_scenes)} scenes for '{file_name}' (CorrelationId: {correlation_id}).")
+                # Здесь вы можете добавить логику для сохранения processed_scenes
+                # Например, сохранить в базу данных, отправить в другую очередь RabbitMQ и т.д.
+                for i, scene in enumerate(processed_scenes):
+                    logger.debug(f"  Scene {scene.scene_id}:")
+                    logger.debug(f"    Setting: {scene.metadata.get('setting')}")
+                    logger.debug(f"    Characters: {scene.metadata.get('characters_present')}")
+                    logger.debug(f"    Summary: {scene.metadata.get('key_events_summary')}")
+            else:
+                logger.warning(f"No scenes processed for '{file_name}' (CorrelationId: {correlation_id}).")
+
+            ch.basic_ack(method.delivery_tag)  # Подтверждаем успешную обработку
+
+        except json.JSONDecodeError:
+            logger.error(f"Failed to decode JSON from message. Body: {body.decode()}")
+            ch.basic_ack(method.delivery_tag)
+        except ValueError as e:
+            logger.error(
+                f"Configuration or processing error: {e} (CorrelationId: {correlation_id}). Acknowledging message.")
+            ch.basic_ack(method.delivery_tag)
+        except Exception as e:
+            logger.error(
+                f"An unhandled error occurred during message processing for CorrelationId: {correlation_id}: {e}. Re-queueing message.")
+            ch.basic_nack(method.delivery_tag, requeue=True)
+
+    def start_consuming(self):
+        """
+        Запускает процесс прослушивания очереди RabbitMQ.
+        Это блокирующая операция.
+        """
+        self._connect_to_rabbitmq()
+        logger.info(f"Starting to consume messages from queue '{self.queue_name}'. To exit, press CTRL+C")
+        self.channel.basic_consume(
+            queue=self.queue_name,
+            on_message_callback=self._on_message_callback,
+            auto_ack=False
+        )
+        try:
+            self.channel.start_consuming()
+        except KeyboardInterrupt:
+            logger.info("Consumer interrupted. Stopping...")
+            self.stop_consuming()
+        except Exception as e:
+            logger.error(f"An error occurred during consumption: {e}")
+            self.stop_consuming()
+
+    def stop_consuming(self):
+        """
+        Останавливает процесс прослушивания и закрывает соединение.
+        """
+        if self.channel and self.channel.is_open:
+            self.channel.stop_consuming()
+            logger.info("Channel consumption stopped.")
+        if self.connection and self.connection.is_open:
+            self.connection.close()
+            logger.info("RabbitMQ connection closed.")
+
+
+if __name__ == "__main__":
+    try:
+        config_manager = ConfigManager(config_file="appsettings.json")
+
+        # Для демонстрации, если ConfigManager еще не создан
+        consumer_service = ScenarioProcessorService(config_manager=config_manager)
+        consumer_service.start_consuming()
+    except (FileNotFoundError, ValueError) as e:
+        logger.critical(f"Service startup failed due to configuration error: {e}")
+    except Exception as e:
+        logger.critical(f"An unhandled error occurred during service startup: {e}", exc_info=True)
