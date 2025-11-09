@@ -31,13 +31,21 @@ class FileDownloaderService:
         self.rabbitmq_host = self.config.get("RabbitMQ", "Host")
         self.rabbitmq_port = self.config.get("RabbitMQ", "Port")
         self.queue_name = self.config.get("RabbitMQ", "QueueName")
+        self.rabbitmq_username = self.config.get("RabbitMQ", "Username")
+        self.rabbitmq_password = self.config.get("RabbitMQ", "Password")
+        self.rabbitmq_vhost = self.config.get("RabbitMQ", "VirtualHost")
+        # Добавьте явную проверку, если ConfigManager может вернуть None
+        if self.rabbitmq_vhost is None:
+            logger.warning("RabbitMQ.VirtualHost not found in config, using default '/'")
+            self.rabbitmq_vhost = "/"
 
         self.download_directory = self.config.get("Service", "DownloadDirectory")
 
         self.download_timeout = self.config.get("FileDownload", "TimeoutSeconds")
         self.download_chunkSize = self.config.get("FileDownload", "ChunkSizeKB")
 
-        if not all([self.rabbitmq_host, self.queue_name, self.download_directory]):
+        if not all([self.rabbitmq_host, self.rabbitmq_port, self.queue_name, self.download_directory,
+                    self.rabbitmq_username, self.rabbitmq_password, self.rabbitmq_vhost]):
             raise ValueError("Missing critical configuration parameters. Check appsettings.json.")
 
         self.connection = None
@@ -56,19 +64,32 @@ class FileDownloaderService:
         while True:
             try:
                 logger.info(f"Attempting to connect to RabbitMQ at {self.rabbitmq_host}...")
-                self.connection = pika.BlockingConnection(pika.ConnectionParameters(host=self.rabbitmq_host, port=5672))
+                credentials = pika.PlainCredentials(self.rabbitmq_username,
+                                                    self.rabbitmq_password)
+                self.connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        host=self.rabbitmq_host,
+                        port=self.rabbitmq_port,
+                        credentials=credentials,  # Передаем учетные данные
+                        virtual_host=self.rabbitmq_vhost  # Передаем учетные данные
+                    )
+                )
                 self.channel = self.connection.channel()
-                # Объявляем очередь. durable=True делает очередь устойчивой к перезапускам брокера.
-                self.channel.queue_declare(queue=self.queue_name, durable=True)
+                # Измените эту строку для явного указания типа очереди 'quorum'
+                self.channel.queue_declare(
+                    queue=self.queue_name,
+                    durable=True,
+                    arguments={'x-queue-type': 'quorum'}  # <--- ДОБАВЛЕНО
+                )
                 logger.info("Successfully connected to RabbitMQ and declared queue.")
                 break
             except pika.exceptions.AMQPConnectionError as e:
-                logger.error(f"Failed to connect to RabbitMQ: {e}. Retrying in 5 seconds...")
-                time.sleep(5)
+                logger.error(f"Failed to connect to RabbitMQ: {e}. Retrying in 5 seconds...")  # [1]
+                time.sleep(5)  # [1]
             except Exception as e:
                 logger.error(
-                    f"An unexpected error occurred while connecting to RabbitMQ: {e}. Retrying in 5 seconds...")
-                time.sleep(5)
+                    f"An unexpected error occurred while connecting to RabbitMQ: {e}. Retrying in 5 seconds...")  # [1]
+                time.sleep(5)  # [1]
 
     def _on_message_callback(self, ch, method, properties, body):
         """
