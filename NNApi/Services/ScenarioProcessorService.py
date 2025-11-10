@@ -33,8 +33,10 @@ class ScenarioProcessorService:
             self.rabbitmq_vhost = "/"
 
         # Параметры Ollama
+
+        ollama_host_from_config = self.config.get("Ollama", "Host")
+        self.ollama_host = ollama_host_from_config if ollama_host_from_config is not None else "http://localhost:11434"
         self.ollama_model_name = self.config.get("Ollama", "ModelName")
-        self.ollama_host = self.config.get("Ollama", "Host", fallback="http://localhost:11434")
 
         # Параметры скачивания
         self.download_timeout = self.config.get("FileDownload", "TimeoutSeconds")
@@ -122,25 +124,44 @@ class ScenarioProcessorService:
         Коллбэк-функция, вызываемая при получении нового сообщения.
         """
         logger.info(f"Received message with delivery tag: {method.delivery_tag}")
-        correlation_id = "N/A"  # Инициализация для случая ошибки до извлечения CorrelationId
+        correlation_id = "N/A"
         try:
             message_data = json.loads(body)
             file_name = message_data.get("FileName")
             storage_url = message_data.get("StorageUrl")
-            file_type = message_data.get("FileType")  # Ожидаем тип файла: 'docx' или 'pdf'
+
+            # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+            # Пытаемся получить FileType из сообщения, но если его нет,
+            # пытаемся извлечь его из FileName.
+            explicit_file_type = message_data.get("FileType")  # Теперь это необязательно
+
+            if explicit_file_type:
+                file_type = explicit_file_type.lower()
+                logger.debug(f"FileType explicitly provided: {file_type}")
+            elif file_name:
+                # Извлекаем расширение файла и используем его как file_type
+                # Например, "my_scenario.docx" -> "docx"
+                # "my_document.pdf" -> "pdf"
+                _, ext = os.path.splitext(file_name)
+                file_type = ext.lstrip('.').lower()  # Удаляем точку и приводим к нижнему регистру
+                logger.debug(f"FileType inferred from FileName: {file_type}")
+            else:
+                file_type = None  # Не удалось определить тип файла
+
             correlation_id = message_data.get("CorrelationId", "N/A")
 
             logger.info(f"Processing CorrelationId: {correlation_id}")
 
-            if not all([file_name, storage_url, file_type]):
-                logger.error(f"Message missing 'FileName', 'StorageUrl', or 'FileType'. Body: {body.decode()}")
+            # Теперь проверка будет только для FileName и StorageUrl
+            if not all([file_name, storage_url]):
+                logger.error(f"Message missing 'FileName' or 'StorageUrl'. Body: {body.decode()}")
                 ch.basic_ack(method.delivery_tag)
                 return
 
-            # Проверяем поддерживаемый тип файла
-            if file_type.lower() not in ["docx", "pdf"]:
+            # Проверяем, удалось ли определить поддерживаемый тип файла
+            if file_type not in ["docx", "pdf"]:
                 logger.error(
-                    f"Unsupported FileType '{file_type}' for '{file_name}' (CorrelationId: {correlation_id}). Message will be acknowledged.")
+                    f"Unsupported or undeterminable FileType '{file_type}' for '{file_name}' (CorrelationId: {correlation_id}). Message will be acknowledged.")
                 ch.basic_ack(method.delivery_tag)
                 return
 
@@ -154,14 +175,13 @@ class ScenarioProcessorService:
                 return
 
             # 2. Обрабатываем документ с помощью DocumentProcessor
-            logger.info(f"Starting scene processing for '{file_name}' (CorrelationId: {correlation_id})...")
-            processed_scenes = self.document_processor.process_document(file_content_bytes, file_type.lower())
+            logger.info(
+                f"Starting scene processing for '{file_name}' (FileType: {file_type}, CorrelationId: {correlation_id})...")
+            processed_scenes = self.document_processor.process_document(file_content_bytes, file_type)
 
             if processed_scenes:
                 logger.info(
                     f"Successfully processed {len(processed_scenes)} scenes for '{file_name}' (CorrelationId: {correlation_id}).")
-                # Здесь вы можете добавить логику для сохранения processed_scenes
-                # Например, сохранить в базу данных, отправить в другую очередь RabbitMQ и т.д.
                 for i, scene in enumerate(processed_scenes):
                     logger.debug(f"  Scene {scene.scene_id}:")
                     logger.debug(f"    Setting: {scene.metadata.get('setting')}")
@@ -169,8 +189,7 @@ class ScenarioProcessorService:
                     logger.debug(f"    Summary: {scene.metadata.get('key_events_summary')}")
             else:
                 logger.warning(f"No scenes processed for '{file_name}' (CorrelationId: {correlation_id}).")
-
-            ch.basic_ack(method.delivery_tag)  # Подтверждаем успешную обработку
+            ch.basic_ack(method.delivery_tag)
 
         except json.JSONDecodeError:
             logger.error(f"Failed to decode JSON from message. Body: {body.decode()}")
