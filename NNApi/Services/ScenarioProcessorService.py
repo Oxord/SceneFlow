@@ -181,14 +181,37 @@ class ScenarioProcessorService:
 
             if processed_scenes:
                 logger.info(
-                    f"Successfully processed {len(processed_scenes)} scenes for '{file_name}' (CorrelationId: {correlation_id}).")
-                for i, scene in enumerate(processed_scenes):
-                    logger.debug(f"  Scene {scene.scene_id}:")
-                    logger.debug(f"    Setting: {scene.metadata.get('setting')}")
-                    logger.debug(f"    Characters: {scene.metadata.get('characters_present')}")
-                    logger.debug(f"    Summary: {scene.metadata.get('key_events_summary')}")
+                    f"Successfully processed {len(processed_scenes)} scenes for '{file_name}' (CorrelationId: {correlation_id}). Displaying results:")
+
+                for scene in processed_scenes:
+                    # Используем INFO, чтобы сообщения всегда были видны
+                    logger.info(f"--- Parsed Scene [{scene.scene_id}] ---")
+
+                    # --- Этап 1: Вывод базовой информации ---
+                    logger.info("  --- Basic Info ---")
+                    metadata = scene.metadata or {}
+                    logger.info(f"    Номер сцены: {metadata.get('scene_number', 'N/A')}")
+                    logger.info(f"    Место и время: {metadata.get('setting', 'N/A')}")
+                    logger.info(f"    Персонажи: {metadata.get('characters_present', [])}")
+                    logger.info(f"    Ключевые события: {metadata.get('key_events_summary', 'N/A')}")
+
+                    # --- Этап 2: Вывод производственных деталей ---
+                    logger.info("  --- Production Details ---")
+                    if scene.production_data:
+                        logger.info(f"    Костюм: {scene.production_data.costume}")
+                        logger.info(f"    Грим/Прически: {scene.production_data.makeup_and_hair}")
+                        logger.info(f"    Реквизит: {scene.production_data.props}")
+                        logger.info(f"    Массовка: {scene.production_data.extras}")
+                        logger.info(f"    Трюки: {scene.production_data.stunts}")
+                        logger.info(f"    Спецэффекты: {scene.production_data.special_effects}")
+                    else:
+                        logger.info("    (Производственные детали не были сгенерированы)")
+
+                    logger.info("------------------------------------")
             else:
                 logger.warning(f"No scenes processed for '{file_name}' (CorrelationId: {correlation_id}).")
+
+                # Подтверждаем обработку сообщения
             ch.basic_ack(method.delivery_tag)
 
         except json.JSONDecodeError:

@@ -1,18 +1,16 @@
-class Scene():
-    def __init__(self, number, header, description, location, time):
-        self.number = number
-        self.header = header
-        self.description = description
-        self.location = location
-        self.time = time
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional
 
-    def __eq__(self, other):
-        if not isinstance(other, Scene):
-            return False
-        return (
-                self.number == other.number and
-                self.header == other.header and
-                self.description == other.description and
-                self.location == other.location and
-                self.time == other.time
-        )
+from NNApi.Entities.ProductionData import ProductionData
+
+
+@dataclass
+class Scene:
+    """
+    Класс для хранения текста одной сцены и извлеченных метаданных.
+    """
+    scene_id: str
+    text: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    production_data: Optional[ProductionData] = None  # Добавляем новое поле
+    raw_llm_response: Dict[str, Any] = field(default_factory=dict)

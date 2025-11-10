@@ -3,7 +3,9 @@ import io
 from typing import List, Union, Dict, Any
 import docx
 import fitz  # PyMuPDF
-from NNApi.Entities.Scene2 import Scene2
+
+from NNApi.Entities.ProductionData import ProductionData
+from NNApi.Entities.Scene import Scene
 import logging
 from NNApi.Services.OllamaClient import OllamaClient
 
@@ -18,7 +20,7 @@ class DocumentProcessor:
     # Паттерн для обнаружения заголовков сцены (INT./EXT. LOCATION - DAY/NIGHT)
     # Этот паттерн может быть улучшен для учета всех возможных вариаций
     SCENE_HEADER_PATTERN = re.compile(
-        r"^(?:ИНТ\.|НАТ\.|I\.?N\.?T\.?|E\.?X\.?T\.?)\s+.*?(?:[\s-]+(?:ДЕНЬ|НОЧЬ|УТРО|ВЕЧЕР|DAWN|DUSK|UNKNOWN))?\s*$",
+        r"^(?:\d[\w.-]*\.\s*)?(?:ИНТ\.|НАТ\.|I\.?N\.?T\.?|E\.?X\.?T\.?)\s+.*",
         re.IGNORECASE | re.MULTILINE
     )
 
@@ -59,42 +61,42 @@ class DocumentProcessor:
 
         return text_content
 
-
-    def _split_into_scenes(self, full_text: str) -> List[Scene2]:
+    def _split_into_scenes(self, full_text: str) -> List[Scene]:
         """
         Разделяет полный текст сценария на отдельные сцены, используя паттерны заголовков.
+        Игнорирует текст до первого найденного заголовка (например, титульный лист).
         """
-        scenes: List[Scene2] = []
+        scenes: List[Scene] = []
         current_scene_lines: List[str] = []
         scene_counter = 0
+        scene_started = False  # Флаг, который показывает, что мы нашли первую сцену
 
-        # Разделяем текст на строки и обрабатываем каждую
         lines = full_text.splitlines()
-        for i, line in enumerate(lines):
+        for line in lines:
             stripped_line = line.strip()
 
             # Если строка похожа на заголовок сцены
             if self.SCENE_HEADER_PATTERN.match(stripped_line):
-                # Если у нас уже есть строки для текущей сцены, сохраняем ее
-                if current_scene_lines:
+                # Если это не первая сцена, сохраняем предыдущую накопленную
+                if scene_started and current_scene_lines:
                     scene_counter += 1
-                    scenes.append(Scene2(
+                    scenes.append(Scene(
                         scene_id=f"Scene_{scene_counter:03d}",
                         text="\n".join(current_scene_lines).strip()
                     ))
-                    current_scene_lines = []  # Начинаем новую сцену
 
-                # Добавляем заголовок сцены к новой сцене
+                # Начинаем новую сцену
+                current_scene_lines = [line]
+                scene_started = True  # Поднимаем флаг после нахождения первого заголовка
+
+            # Если мы уже начали собирать сцены и строка непустая
+            elif scene_started and stripped_line:
                 current_scene_lines.append(line)
-            elif stripped_line:  # Добавляем только непустые строки
-                current_scene_lines.append(line)
-            # else: # Если строка пустая, можем игнорировать или добавить как разделитель
-            #     current_scene_lines.append(line)
 
         # Добавляем последнюю сцену, если что-то осталось
         if current_scene_lines:
             scene_counter += 1
-            scenes.append(Scene2(
+            scenes.append(Scene(
                 scene_id=f"Scene_{scene_counter:03d}",
                 text="\n".join(current_scene_lines).strip()
             ))
@@ -102,30 +104,45 @@ class DocumentProcessor:
         print(f"Документ разделен на {len(scenes)} сцен.")
         return scenes
 
-    def process_document(self, file_source: Union[str, bytes], file_type: str) -> List[Scene2]:
-        """
-        Основной метод для обработки документа.
-        """
+    def process_document(self, file_source: Union[str, bytes], file_type: str) -> List[Scene]:
         # 1. Загрузка и извлечение всего текста
         full_text = self._load_document_content(file_source, file_type)
         if not full_text:
             print("Не удалось извлечь текст из документа.")
             return []
 
-        # 2. Разделение текста на сцены
         scenes = self._split_into_scenes(full_text)
 
-        processed_scenes: List[Scene2] = []
+        processed_scenes: List[Scene] = []
         for i, scene in enumerate(scenes):
             print(f"Обработка сцены {scene.scene_id} ({i + 1}/{len(scenes)})...")
-            # 3. Отправка каждой сцены в LLM
+
+            # --- ЭТАП 1: БАЗОВЫЙ ПАРСИНГ ---
             llm_output = self.ollama_client.extract_scene_info(scene.text)
             scene.metadata = llm_output
-            scene.raw_llm_response = llm_output  # Сохраняем полный ответ для отладки
-            processed_scenes.append(scene)
+            scene.raw_llm_response = llm_output
 
-            # Опционально: небольшая задержка между запросами к LLM, чтобы не перегружать
-            # time.sleep(0.5)
+            # --- ЭТАП 2: ОБОГАЩЕНИЕ ДАННЫМИ ---
+            # Проверяем, что базовый парсинг прошел успешно
+            if scene.metadata and "key_events_summary" in scene.metadata:
+                summary = scene.metadata.get("key_events_summary", "")
+
+                print(f"  -> Генерация производственных деталей для сцены {scene.scene_id}...")
+                prod_details_dict = self.ollama_client.generate_production_details(summary, scene.text)
+
+                # Создаем и заполняем наш dataclass
+                if prod_details_dict:
+                    scene.production_data = ProductionData(
+                        costume=prod_details_dict.get("costume", "N/A"),
+                        makeup_and_hair=prod_details_dict.get("makeup_and_hair", "N/A"),
+                        props=prod_details_dict.get("props", []),
+                        extras=prod_details_dict.get("extras", "N/A"),
+                        stunts=prod_details_dict.get("stunts", "N/A"),
+                        special_effects=prod_details_dict.get("special_effects", "N/A"),
+                        music=prod_details_dict.get("music", "N/A")
+                    )
+
+            processed_scenes.append(scene)
 
         print("Обработка всех сцен завершена.")
         return processed_scenes
