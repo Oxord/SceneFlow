@@ -1,3 +1,5 @@
+import uuid
+
 import pika
 import json
 import requests
@@ -9,6 +11,7 @@ from urllib.parse import urlparse
 
 from NNApi.Configurtaion.ConfigManager import ConfigManager
 from NNApi.Services.DocumentProcessor import DocumentProcessor
+from NNApi.Utils.SceneManager import SceneManager
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -28,6 +31,7 @@ class ScenarioProcessorService:
         self.rabbitmq_username = self.config.get("RabbitMQ", "Username")
         self.rabbitmq_password = self.config.get("RabbitMQ", "Password")
         self.rabbitmq_vhost = self.config.get("RabbitMQ", "VirtualHost")
+        self.output_queue_name = self.config.get("RabbitMQ", "OutputQueueName")
         if self.rabbitmq_vhost is None:
             logger.warning("RabbitMQ.VirtualHost not found in config, using default '/'")
             self.rabbitmq_vhost = "/"
@@ -74,6 +78,11 @@ class ScenarioProcessorService:
                 self.channel = self.connection.channel()
                 self.channel.queue_declare(
                     queue=self.queue_name,
+                    durable=True,
+                    arguments={'x-queue-type': 'quorum'}
+                )
+                self.channel.queue_declare(
+                    queue=self.output_queue_name,
                     durable=True,
                     arguments={'x-queue-type': 'quorum'}
                 )
@@ -183,31 +192,29 @@ class ScenarioProcessorService:
                 logger.info(
                     f"Successfully processed {len(processed_scenes)} scenes for '{file_name}' (CorrelationId: {correlation_id}). Displaying results:")
 
-                for scene in processed_scenes:
-                    # Используем INFO, чтобы сообщения всегда были видны
-                    logger.info(f"--- Parsed Scene [{scene.scene_id}] ---")
-
-                    # --- Этап 1: Вывод базовой информации ---
-                    logger.info("  --- Basic Info ---")
-                    metadata = scene.metadata or {}
-                    logger.info(f"    Номер сцены: {metadata.get('scene_number', 'N/A')}")
-                    logger.info(f"    Место и время: {metadata.get('setting', 'N/A')}")
-                    logger.info(f"    Персонажи: {metadata.get('characters_present', [])}")
-                    logger.info(f"    Ключевые события: {metadata.get('key_events_summary', 'N/A')}")
-
-                    # --- Этап 2: Вывод производственных деталей ---
-                    logger.info("  --- Production Details ---")
-                    if scene.production_data:
-                        logger.info(f"    Костюм: {scene.production_data.costume}")
-                        logger.info(f"    Грим/Прически: {scene.production_data.makeup_and_hair}")
-                        logger.info(f"    Реквизит: {scene.production_data.props}")
-                        logger.info(f"    Массовка: {scene.production_data.extras}")
-                        logger.info(f"    Трюки: {scene.production_data.stunts}")
-                        logger.info(f"    Спецэффекты: {scene.production_data.special_effects}")
-                    else:
-                        logger.info("    (Производственные детали не были сгенерированы)")
-
-                    logger.info("------------------------------------")
+                manager = SceneManager()
+                created_file = manager.convert_scenes_to_json(processed_scenes, "final_export.json")
+                if created_file:
+                    manager.upload_to_cloud(created_file)
+                    object_key = f"{uuid.uuid4().hex}_{file_name}"
+                    output_message = {
+                        "FileName": file_name,
+                        "CorrelationId": correlation_id,
+                        "StorageUrl": f"https://s3.twcstorage.ru/be185a38-d8c61f38-cafe-4b90-97cf-54bf209995b6/{object_key}",
+                        "SceneCount": len(processed_scenes)
+                    }
+                    # Отправляем сообщение в выходную очередь
+                    try:
+                        self.channel.basic_publish(
+                            exchange='ScenesProcessed',
+                            routing_key=self.output_queue_name,
+                            body=json.dumps(output_message)
+                        )
+                        logger.info(
+                            f"Published message to output queue '{self.output_queue_name}' (CorrelationId: {correlation_id}).")
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to publish message to output queue: {e} (CorrelationId: {correlation_id}).")
             else:
                 logger.warning(f"No scenes processed for '{file_name}' (CorrelationId: {correlation_id}).")
 

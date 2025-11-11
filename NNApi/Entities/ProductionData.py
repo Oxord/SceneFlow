@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import List
 
 @dataclass
@@ -11,3 +11,8 @@ class ProductionData:
     stunts: str = "N/A"  # Каскадеры/трюки
     special_effects: str = "N/A"
     music: str = "N/A"
+
+    def to_dict(self):
+        """Преобразует объект ProductionData в словарь."""
+        # Используем asdict для простоты, так как это dataclass
+        return asdict(self)
