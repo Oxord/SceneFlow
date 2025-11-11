@@ -1,5 +1,4 @@
-﻿
-using Domain.Models;
+﻿using Domain.Models;
 using Domain.Services;
 using Infrastructure.RabbitMQ;
 using Infrastructure.Services;
@@ -22,6 +21,7 @@ namespace API
 
             builder.Services.Configure<CloudStorageSettings>( builder.Configuration.GetSection( "CloudStorageSettings" ) );
             builder.Services.AddSingleton<ICloudStorageService, CloudStorageService>();
+            builder.Services.AddHttpClient();
 
             // Настройки RabbitMQ
             builder.Services.Configure<RabbitMQSettings>( builder.Configuration.GetSection( "RabbitMQSettings" ) );
@@ -34,6 +34,14 @@ namespace API
                 // Вызовите здесь асинхронный метод синхронно, например:
                 return RabbitMQPublisher.CreateAsync( settings ).GetAwaiter().GetResult();
             } );
+            builder.Services.AddSingleton<IMessageQueueConsumer, RabbitMQConsumer>( sp =>
+            {
+                var settings = sp.GetRequiredService<IOptions<RabbitMQSettings>>();
+                return RabbitMQConsumer.CreateAsync( settings ).GetAwaiter().GetResult();
+            } );
+
+            builder.Services.AddHostedService<BackgroundConsumerService>();
+            builder.Services.AddSingleton<IExcelGenerationService, ExcelGenerationService>();
 
             var app = builder.Build();
 

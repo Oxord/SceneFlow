@@ -10,5 +10,7 @@
         /// <param name="contentType">Тип контента (MIME-тип) файла.</param>
         /// <returns>URL загруженного файла.</returns>
         Task<string> UploadFileAsync( Stream fileStream, string fileName, string contentType );
+        Task<Stream> DownloadFileAsStreamAsync( string objectKey );
+        string GetBucketName();
     }
 }

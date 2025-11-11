@@ -38,32 +38,30 @@ namespace API.Controllers
 
             try
             {
-                // Открываем поток файла
                 using ( var fileStream = file.OpenReadStream() )
                 {
-                    // 1. Загружаем файл в облачное хранилище
                     string storageUrl = await _cloudStorageService.UploadFileAsync(
                         fileStream,
                         file.FileName,
-                        file.ContentType // Важно передать правильный ContentType
+                        file.ContentType
                     );
 
                     var fileStorage = new FileStorage( file.FileName, file.Length, storageUrl );
-                    _fileStorageList.Add( fileStorage ); // Для примера, сохраняем в список
+                    _fileStorageList.Add( fileStorage );
 
-                    // 2. Публикуем сообщение в RabbitMQ
+                    var correlationId = Guid.NewGuid().ToString();
                     var uploadEvent = new FileUploadedEvent
                     {
                         FileName = fileStorage.FileName,
                         FileSize = fileStorage.FileSize,
                         StorageUrl = fileStorage.StorageUrl,
                         UploadedAt = fileStorage.UploadedAt,
-                        CorrelationId = Guid.NewGuid().ToString() // Для отслеживания
+                        CorrelationId = correlationId
                     };
 
                     await _messageQueuePublisher.PublishAsync( uploadEvent, _rabbitMQSettings.QueueName );
 
-                    return Ok( new { fileStorage.FileName, fileStorage.FileSize, fileStorage.StorageUrl } );
+                    return Accepted( new { CorrelationId = correlationId } );
                 }
             }
             catch ( Exception ex )

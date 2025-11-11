@@ -43,5 +43,20 @@ namespace Infrastructure.Services
             // Для S3-совместимых хранилищ обычно такой формат: ServiceURL/BucketName/Key
             return $"{_settings.ServiceUrl}/{_settings.BucketName}/{objectKey}";
         }
+
+        public async Task<Stream> DownloadFileAsStreamAsync( string objectKey )
+        {
+            var request = new GetObjectRequest
+            {
+                BucketName = _settings.BucketName,
+                Key = objectKey
+            };
+
+            GetObjectResponse response = await _s3Client.GetObjectAsync( request );
+
+            return response.ResponseStream;
+        }
+
+        public string GetBucketName() => _settings.BucketName;
     }
 }

@@ -195,20 +195,40 @@ class ScenarioProcessorService:
                 manager = SceneManager()
                 created_file = manager.convert_scenes_to_json(processed_scenes, "final_export.json")
                 if created_file:
-                    manager.upload_to_cloud(created_file)
-                    object_key = f"{uuid.uuid4().hex}_{file_name}"
-                    output_message = {
-                        "FileName": file_name,
-                        "CorrelationId": correlation_id,
-                        "StorageUrl": f"https://s3.twcstorage.ru/be185a38-d8c61f38-cafe-4b90-97cf-54bf209995b6/{object_key}",
-                        "SceneCount": len(processed_scenes)
-                    }
-                    # Отправляем сообщение в выходную очередь
+                    # 1. Генерируем уникальное имя файла для облака
+                    base_name = os.path.basename(created_file)
+                    object_key_for_cloud = f"{uuid.uuid4().hex}_{base_name}"
+
+                    # 2. Вызываем обновленную функцию
+                    final_storage_url = manager.upload_to_cloud(created_file, object_key_for_cloud)
+
+                    # 3. Проверяем, что функция вернула URL, а не None
+                    if final_storage_url:
+                        # 4. Используем реальный URL в сообщении
+                        output_message = {
+                            "FileName": file_name,
+                            "CorrelationId": correlation_id,
+                            "StorageUrl": final_storage_url,  # <-- Здесь будет корректный URL
+                            "SceneCount": len(processed_scenes)
+                        }
+                        # ... (код отправки сообщения в RabbitMQ) ...
+                    else:
+                        logger.error("Загрузка в облако не удалась, сообщение не отправлено.")
+
                     try:
+                        # 1. Сериализуем словарь в JSON-строку.
+                        #    Добавляем ensure_ascii=False, чтобы кириллица не экранировалась в \uXXXX.
+                        #    Это делает сообщение читаемым в админке RabbitMQ.
+                        json_string = json.dumps(output_message, ensure_ascii=False)
+
+                        # 2. ЯВНО кодируем строку в байты с использованием UTF-8.
+                        body_bytes = json_string.encode('utf-8')
+
+                        # 3. Отправляем в очередь именно байты.
                         self.channel.basic_publish(
                             exchange='ScenesProcessed',
                             routing_key=self.output_queue_name,
-                            body=json.dumps(output_message)
+                            body=body_bytes  # <-- Передаем подготовленные байты
                         )
                         logger.info(
                             f"Published message to output queue '{self.output_queue_name}' (CorrelationId: {correlation_id}).")
