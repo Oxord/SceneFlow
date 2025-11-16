@@ -40,8 +40,8 @@ namespace Domain.Models
 
     public class ProductionData
     {
-        [JsonPropertyName( "costume" )]
-        public string Costume { get; set; }
+        //[JsonPropertyName( "costume" )]
+        //public string Costume { get; set; }
 
         // Используем 'object', так как в данных это поле может быть как строкой, так и массивом []
         [JsonPropertyName( "makeup_and_hair" )]

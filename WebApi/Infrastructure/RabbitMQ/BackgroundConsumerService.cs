@@ -1,46 +1,52 @@
-﻿using System.Web;
+﻿using System.Text.Json; // Убедитесь, что этот using есть
 using Amazon.S3;
 using Domain.Models;
 using Domain.Services;
-using Infrastructure.Services;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-
 
 namespace Infrastructure.RabbitMQ
 {
     public class BackgroundConsumerService : BackgroundService
     {
         private readonly ILogger<BackgroundConsumerService> _logger;
-        private readonly IHttpClientFactory _httpClientFactory;
         private readonly IMessageQueueConsumer _consumer;
         private readonly ICloudStorageService _cloudStorageService;
         private readonly IExcelGenerationService _excelGenerationService;
+        private readonly IReportStorageService _reportStorageService; // <-- ДОБАВЛЕНО
 
-        // Через DI получаем наш consumer и логгер
         public BackgroundConsumerService(
             IMessageQueueConsumer consumer,
             ILogger<BackgroundConsumerService> logger,
             ICloudStorageService cloudStorageService,
-            IExcelGenerationService excelGenerationService )
+            IExcelGenerationService excelGenerationService,
+            IReportStorageService reportStorageService ) // <-- ДОБАВЛЕНО
         {
             _consumer = consumer;
             _logger = logger;
             _cloudStorageService = cloudStorageService;
             _excelGenerationService = excelGenerationService;
+            _reportStorageService = reportStorageService; // <-- ДОБАВЛЕНО
         }
 
-        // Этот метод вызывается ОДИН РАЗ при старте приложения
         protected override async Task ExecuteAsync( CancellationToken stoppingToken )
         {
+            // ... ваш код ExecuteAsync остается без изменений ...
+            // Убедитесь, что вы обрабатываете тип сообщения ScenesProcessed,
+            // который, как я предполагаю, содержит CorrelationId.
+            // Если он называется по-другому, поправьте.
+            // Пример:
+            // public class ScenesProcessed {
+            //     public string CorrelationId { get; set; }
+            //     public string StorageUrl { get; set; }
+            // }
+
             _logger.LogInformation( "Background Consumer Service is starting." );
-
             stoppingToken.Register( () => _logger.LogInformation( "Background Consumer Service is stopping." ) );
-
             try
             {
                 var quorumQueueArgs = new Dictionary<string, object> { { "x-queue-type", "quorum" } };
-
+                // Убедитесь, что тип сообщения ScenesProcessed содержит CorrelationId
                 await _consumer.StartConsumingAsync<ScenesProcessed>(
                     queueName: "sf_scenes",
                     exchangeName: "ScenesProcessed",
@@ -48,120 +54,94 @@ namespace Infrastructure.RabbitMQ
                     onMessageReceived: HandleScenesProcessedEvent,
                     quorumQueueArgs
                 );
-                _logger.LogInformation( "Consumer for 'orders-queue' has been started." );
 
                 while ( !stoppingToken.IsCancellationRequested )
                 {
                     await Task.Delay( 1000, stoppingToken );
                 }
             }
-            catch ( OperationCanceledException )
-            {
-                // Исключение при graceful shutdown, это нормально.
-                _logger.LogInformation( "Background Consumer Service was cancelled." );
-            }
-            catch ( Exception ex )
-            {
-                _logger.LogError( ex, "An unhandled exception occurred in Background Consumer Service." );
-            }
-
+            catch ( OperationCanceledException ) { /* ... */ }
+            catch ( Exception ex ) { /* ... */ }
             _logger.LogInformation( "Background Consumer Service has stopped." );
         }
 
-        // Обработчик для второго типа сообщений
         private async Task HandleScenesProcessedEvent( ScenesProcessed message )
         {
-            // ЛОГ 1: Исходный URL
-            _logger.LogInformation( "Received message with StorageUrl: '{Url}'", message.StorageUrl );
-
-            if ( string.IsNullOrWhiteSpace( message.StorageUrl ) )
+            // Используем CorrelationId из сообщения для отслеживания и именования файла
+            var correlationId = message.CorrelationId;
+            if ( string.IsNullOrEmpty( correlationId ) )
             {
-                _logger.LogWarning( "StorageUrl is empty for file '{FileName}'. Skipping.", message.CorrelationId );
-                return;
+                _logger.LogError( "Received message without a CorrelationId. Cannot process." );
+                return; // Выходим, если нет ID
             }
+
+            _logger.LogInformation( "[{CorrelationId}] - Starting report generation.", correlationId );
+
+            // 1. Устанавливаем статус "В обработке"
+            _reportStorageService.SetState( correlationId, new ReportState { Status = "Processing" } );
+
             try
             {
+                // 2. Получаем ключ исходного JSON-файла из URL
+                // (Ваш код для парсинга URL здесь, он был корректным)
                 var uri = new Uri( message.StorageUrl );
-                string encodedPath = uri.AbsolutePath;
                 string bucketPathPart = $"/{_cloudStorageService.GetBucketName()}/";
-
-                // ЛОГ 2: Путь из URL и ожидаемая часть бакета
-                _logger.LogInformation( "Parsed AbsolutePath: '{Path}'. Expected bucket part: '{BucketPart}'", encodedPath, bucketPathPart );
-
-                if ( !encodedPath.StartsWith( bucketPathPart, StringComparison.OrdinalIgnoreCase ) )
+                if ( !uri.AbsolutePath.StartsWith( bucketPathPart, StringComparison.OrdinalIgnoreCase ) )
                 {
-                    _logger.LogError( "URL path '{Path}' does not match expected bucket structure '{BucketPath}'.", encodedPath, bucketPathPart );
-                    return;
+                    throw new InvalidOperationException( $"URL path '{uri.AbsolutePath}' does not match expected bucket structure '{bucketPathPart}'." );
                 }
+                string encodedObjectKey = uri.AbsolutePath.Substring( bucketPathPart.Length );
+                string sourceObjectKey = Uri.UnescapeDataString( encodedObjectKey ).Trim();
 
-                string encodedObjectKey = encodedPath.Substring( bucketPathPart.Length );
-
-
-                string decodedObjectKey = Uri.UnescapeDataString( encodedObjectKey ); // Ваша строка
-                _logger.LogInformation( "Decoded Object Key (before trim): '{Key}'", decodedObjectKey );
-                _logger.LogInformation( "Extracted Encoded Object Key: '{Key}'", encodedObjectKey );
-
-
-                string objectKey = decodedObjectKey.Trim();
-
-                _logger.LogInformation( "Attempting to download with Bucket: '{B}' and Key: '{K}'", _cloudStorageService.GetBucketName(), objectKey );
-
+                // 3. Скачиваем и десериализуем JSON
+                _logger.LogInformation( "[{CorrelationId}] - Downloading source JSON from key: {Key}", correlationId, sourceObjectKey );
                 string jsonContent;
-                await using ( Stream fileStream = await _cloudStorageService.DownloadFileAsStreamAsync( objectKey ) )
+                await using ( Stream fileStream = await _cloudStorageService.DownloadFileAsStreamAsync( sourceObjectKey ) )
                 {
                     using ( var reader = new StreamReader( fileStream ) )
                     {
                         jsonContent = await reader.ReadToEndAsync();
                     }
                 }
-                _logger.LogInformation( "Download successful. Content length: {Length} chars.", jsonContent.Length );
 
-                // --- НАЧАЛО НОВОЙ ЛОГИКИ ---
-
-                // 1. Десериализуем JSON в список наших объектов
-                var scenes = System.Text.Json.JsonSerializer.Deserialize<List<Scene>>( jsonContent );
+                var scenes = JsonSerializer.Deserialize<List<Scene>>( jsonContent ); // Убедитесь, что модель Scene и ее дочерние классы соответствуют JSON
                 if ( scenes == null || scenes.Count == 0 )
                 {
-                    _logger.LogWarning( "JSON file '{Key}' is empty or could not be parsed.", objectKey );
-                    return;
+                    throw new InvalidDataException( "Source JSON file is empty or could not be parsed into scenes." );
                 }
-                _logger.LogInformation( "Successfully parsed {Count} scenes from JSON.", scenes.Count );
+                _logger.LogInformation( "[{CorrelationId}] - Successfully parsed {Count} scenes.", correlationId, scenes.Count );
 
-                // 2. Генерируем Excel-файл в виде массива байтов
+                // 4. Генерируем Excel-отчет в виде массива байтов
                 byte[] excelFileBytes = _excelGenerationService.CreateSceneReport( scenes );
-                _logger.LogInformation( "Excel report generated. Size: {Size} bytes.", excelFileBytes.Length );
+                _logger.LogInformation( "[{CorrelationId}] - Excel report generated, size: {Size} bytes.", correlationId, excelFileBytes.Length );
 
-                // Формируем имя файла, чтобы избежать перезаписи
-                string originalFileName = Path.GetFileNameWithoutExtension( objectKey );
-                string excelFileName = $"{originalFileName}_{DateTime.UtcNow:yyyyMMddHHmmss}.xlsx";
+                // --- ВОТ КЛЮЧЕВОЙ МОМЕНТ ---
 
-                // Определяем путь для сохранения. 
-                // В этом примере мы создадим папку 'GeneratedReports' в директории, где запущено приложение.
-                // Вы можете указать любой другой путь, например "D:\\MyReports".
-                string outputDirectory = Path.Combine( AppContext.BaseDirectory, "GeneratedReports" );
+                // 5. Формируем ключ (путь и имя) для нового файла отчета в S3
+                var contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
-                // Убедимся, что папка существует
-                Directory.CreateDirectory( outputDirectory );
+                // 6. Загружаем байты отчета в облако (S3)
+                string url;
+                using ( var reportStream = new MemoryStream( excelFileBytes ) )
+                {
+                    url = await _cloudStorageService.UploadFileAsync( reportStream, correlationId, contentType );
+                }
+                _logger.LogInformation( url );
+                _logger.LogInformation( "[{CorrelationId}] - Excel report successfully uploaded to S3 with key", correlationId );
 
-                // Соединяем путь к папке и имя файла
-                string fullPath = Path.Combine( outputDirectory, excelFileName );
-
-                // Асинхронно записываем все байты в файл
-                await File.WriteAllBytesAsync( fullPath, excelFileBytes );
-
-                _logger.LogInformation( "Excel report successfully saved to local path: '{Path}'", fullPath );
-
-            }
-            catch ( AmazonS3Exception ex )
-            {
-                _logger.LogError( ex,
-                    "S3 error while downloading file. " +
-                    "StatusCode: {StatusCode}, ErrorCode: {ErrorCode}, Message: {S3Message}",
-                    ex.StatusCode, ex.ErrorCode, ex.Message );
+                // 7. Устанавливаем финальный статус "Завершено"
+                _reportStorageService.SetState( correlationId, new ReportState { Status = "Completed", Url = url } );
             }
             catch ( Exception ex )
             {
-                _logger.LogError( ex, "An unexpected error occurred while processing file." );
+                _logger.LogError( ex, "[{CorrelationId}] - Failed to process report.", correlationId );
+
+                // В случае любой ошибки устанавливаем статус "Ошибка"
+                _reportStorageService.SetState( correlationId, new ReportState
+                {
+                    Status = "Failed",
+                    ErrorMessage = ex.Message
+                } );
             }
         }
     }

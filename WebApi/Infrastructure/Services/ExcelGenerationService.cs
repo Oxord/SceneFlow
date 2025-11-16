@@ -1,100 +1,100 @@
 ﻿using System.Text.Json;
-using ClosedXML.Excel;
 using Domain.Models;
 using Domain.Services;
+using NPOI.SS.UserModel;
+using NPOI.XSSF.UserModel;
 
-namespace Infrastructure.Services
+
+public class ExcelGenerationService : IExcelGenerationService
 {
-    public class ExcelGenerationService : IExcelGenerationService
+    private readonly ICloudStorageService _cloudStorageService;
+
+    public ExcelGenerationService( ICloudStorageService cloudStorageService )
     {
-        public byte[] CreateSceneReport( IEnumerable<Scene> scenes )
+        _cloudStorageService = cloudStorageService;
+    }
+
+    public byte[] CreateSceneReport( IEnumerable<Scene> scenes )
+    {
+        IWorkbook workbook = new XSSFWorkbook();
+        ISheet worksheet = workbook.CreateSheet( "Сцены" );
+        var headers = new List<string>
         {
-            using ( var workbook = new XLWorkbook() )
-            {
-                var worksheet = workbook.Worksheets.Add( "Сцены" );
-                var headers = new List<string>
-            {
-                "Серия", "Сцена", "Режим", "Инт / нат", "Объект / Подобъект / Синопсис",
-                "Время года / Примечание", "Персонажи", "Массовка", "Групповка", "Грим",
-                "Костюм", "Реквизит", "Игровой транспорт", "Декорация", "Пиротехника",
-                "Каскадер / Трюк", "Музыка", "Спецэффект", "Спец. оборудование"
-            };
+            "Серия", "Сцена", "Режим", "Инт / нат", "Объект / Подобъект / Синопсис",
+            "Время года / Примечание", "Персонажи", "Массовка", "Групповка", "Грим",
+            "Костюм", "Реквизит", "Игровой транспорт", "Декорация", "Пиротехника",
+            "Каскадер / Трюк", "Музыка", "Спецэффект", "Спец. оборудование"
+        };
 
-                for ( int i = 0; i < headers.Count; i++ )
-                {
-                    worksheet.Cell( 1, i + 1 ).Value = headers[ i ];
-                }
+        IFont headerFont = workbook.CreateFont();
+        headerFont.IsBold = true;
+        ICellStyle headerStyle = workbook.CreateCellStyle();
+        headerStyle.SetFont( headerFont );
+        headerStyle.FillForegroundColor = IndexedColors.Grey25Percent.Index;
+        headerStyle.FillPattern = FillPattern.SolidForeground;
 
-                var headerRange = worksheet.Range( 1, 1, 1, headers.Count );
-                headerRange.Style.Font.Bold = true;
-                headerRange.Style.Fill.BackgroundColor = XLColor.LightGray;
-
-                int currentRow = 2;
-                foreach ( var scene in scenes )
-                {
-                    // Разбор строки "setting" для получения Режима и Инт/Нат
-                    var settingParts = scene.Metadata?.Setting?.Split( new[] { ' ', '.' }, StringSplitOptions.RemoveEmptyEntries ) ?? new string[ 0 ];
-                    var locationType = settingParts.FirstOrDefault() ?? ""; // ИНТ или НАТ
-                    var mode = settingParts.LastOrDefault() ?? ""; // НОЧЬ или ДЕНЬ
-
-                    // Разбор номера сцены для получения номера серии
-                    var seriesNumber = scene.Metadata?.SceneNumber?.Split( '-' ).FirstOrDefault() ?? "";
-
-                    // Заполняем ячейки, обращаясь к правильным вложенным свойствам
-                    worksheet.Cell( currentRow, 1 ).Value = seriesNumber;
-                    worksheet.Cell( currentRow, 2 ).Value = scene.Metadata?.SceneNumber;
-                    worksheet.Cell( currentRow, 3 ).Value = mode;
-                    worksheet.Cell( currentRow, 4 ).Value = locationType;
-                    worksheet.Cell( currentRow, 5 ).Value = $"{scene.Metadata?.Setting} / {scene.Metadata?.KeyEventsSummary}";
-                    worksheet.Cell( currentRow, 6 ).Value = scene.Metadata?.LocationDetails;
-                    worksheet.Cell( currentRow, 7 ).Value = scene.Metadata.CharactersPresent != null ? string.Join( ", ", scene.Metadata.CharactersPresent ) : "";
-                    worksheet.Cell( currentRow, 8 ).Value = FormatDynamicField( scene.ProductionData?.Extras );
-                    worksheet.Cell( currentRow, 9 ).Value = ""; // Групповка - нет данных в JSON
-                    worksheet.Cell( currentRow, 10 ).Value = FormatDynamicField( scene.ProductionData?.MakeupAndHair );
-                    worksheet.Cell( currentRow, 11 ).Value = scene.ProductionData?.Costume;
-                    worksheet.Cell( currentRow, 12 ).Value = scene.ProductionData?.Props != null ? string.Join( ", ", scene.ProductionData.Props ) : "";
-                    worksheet.Cell( currentRow, 13 ).Value = ""; // Игровой транспорт - нет данных
-                    worksheet.Cell( currentRow, 14 ).Value = ""; // Декорация - нет данных
-                    worksheet.Cell( currentRow, 15 ).Value = ""; // Пиротехника - нет данных
-                    worksheet.Cell( currentRow, 16 ).Value = FormatDynamicField( scene.ProductionData?.Stunts );
-                    worksheet.Cell( currentRow, 17 ).Value = FormatDynamicField( scene.ProductionData?.Music );
-                    worksheet.Cell( currentRow, 18 ).Value = FormatDynamicField( scene.ProductionData?.SpecialEffects );
-                    worksheet.Cell( currentRow, 19 ).Value = ""; // Спец. оборудование - нет данных
-
-                    currentRow++;
-                }
-
-                worksheet.Columns().AdjustToContents();
-
-                using ( var stream = new MemoryStream() )
-                {
-                    workbook.SaveAs( stream );
-                    return stream.ToArray();
-                }
-            }
+        IRow headerRow = worksheet.CreateRow( 0 );
+        for ( int i = 0; i < headers.Count; i++ )
+        {
+            ICell cell = headerRow.CreateCell( i );
+            cell.SetCellValue( headers[ i ] );
+            cell.CellStyle = headerStyle;
         }
 
-        /// <summary>
-        /// Вспомогательный метод для форматирования полей, которые могут быть
-        /// строкой или массивом строк (десериализованным как JsonElement).
-        /// </summary>
-        private string FormatDynamicField( object field )
+        int currentRowIndex = 1;
+        foreach ( var scene in scenes )
         {
-            if ( field == null ) return "";
+            IRow dataRow = worksheet.CreateRow( currentRowIndex );
+            var settingParts = scene.Metadata?.Setting?.Split( new[] { ' ', '.' }, StringSplitOptions.RemoveEmptyEntries ) ?? Array.Empty<string>();
+            var locationType = settingParts.FirstOrDefault() ?? "";
+            var mode = settingParts.LastOrDefault() ?? "";
+            var seriesNumber = scene.Metadata?.SceneNumber?.Split( '-' ).FirstOrDefault() ?? "";
 
-            if ( field is JsonElement jsonElement )
-            {
-                if ( jsonElement.ValueKind == JsonValueKind.Array )
-                {
-                    // Если это массив, объединяем его элементы в строку
-                    return string.Join( ", ", jsonElement.EnumerateArray().Select( e => e.ToString() ) );
-                }
-                // Если это не массив (например, строка), просто возвращаем его значение
-                return jsonElement.ToString();
-            }
-
-            // На случай, если тип уже является строкой
-            return field.ToString();
+            dataRow.CreateCell( 0 ).SetCellValue( seriesNumber );
+            dataRow.CreateCell( 1 ).SetCellValue( scene.Metadata?.SceneNumber );
+            dataRow.CreateCell( 2 ).SetCellValue( mode );
+            dataRow.CreateCell( 3 ).SetCellValue( locationType );
+            dataRow.CreateCell( 4 ).SetCellValue( $"{scene.Metadata?.Setting} / {scene.Metadata?.KeyEventsSummary}" );
+            dataRow.CreateCell( 5 ).SetCellValue( scene.Metadata?.LocationDetails );
+            dataRow.CreateCell( 6 ).SetCellValue( scene.Metadata.CharactersPresent != null ? string.Join( ", ", scene.Metadata.CharactersPresent ) : "" );
+            dataRow.CreateCell( 7 ).SetCellValue( FormatDynamicField( scene.ProductionData?.Extras ) );
+            dataRow.CreateCell( 8 ).SetCellValue( "" ); // Групповка
+            dataRow.CreateCell( 9 ).SetCellValue( FormatDynamicField( scene.ProductionData?.MakeupAndHair ) );
+            //dataRow.CreateCell( 10 ).SetCellValue( scene.ProductionData?.Costume != null ? string.Join( ", ", scene.ProductionData.Costume ) : "" );
+            dataRow.CreateCell( 11 ).SetCellValue( scene.ProductionData?.Props != null ? string.Join( ", ", scene.ProductionData.Props ) : "" );
+            dataRow.CreateCell( 12 ).SetCellValue( "" ); // Игровой транспорт
+            dataRow.CreateCell( 13 ).SetCellValue( "" ); // Декорация
+            dataRow.CreateCell( 14 ).SetCellValue( "" ); // Пиротехника
+            dataRow.CreateCell( 15 ).SetCellValue( FormatDynamicField( scene.ProductionData?.Stunts ) );
+            dataRow.CreateCell( 16 ).SetCellValue( FormatDynamicField( scene.ProductionData?.Music ) );
+            dataRow.CreateCell( 17 ).SetCellValue( FormatDynamicField( scene.ProductionData?.SpecialEffects ) );
+            dataRow.CreateCell( 18 ).SetCellValue( "" ); // Спец. оборудование
+            currentRowIndex++;
         }
+
+        for ( int i = 0; i < headers.Count; i++ )
+        {
+            worksheet.AutoSizeColumn( i );
+        }
+
+        using ( var stream = new MemoryStream() )
+        {
+            workbook.Write( stream );
+            return stream.ToArray();
+        }
+    }
+
+    private string FormatDynamicField( object field )
+    {
+        if ( field == null ) return "";
+        if ( field is JsonElement jsonElement )
+        {
+            if ( jsonElement.ValueKind == JsonValueKind.Array )
+            {
+                return string.Join( ", ", jsonElement.EnumerateArray().Select( e => e.ToString() ) );
+            }
+            return jsonElement.ToString();
+        }
+        return field.ToString();
     }
 }

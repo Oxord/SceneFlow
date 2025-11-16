@@ -42,6 +42,7 @@ namespace API
 
             builder.Services.AddHostedService<BackgroundConsumerService>();
             builder.Services.AddSingleton<IExcelGenerationService, ExcelGenerationService>();
+            builder.Services.AddSingleton<IReportStorageService, InMemoryReportStorageService>();
 
             var app = builder.Build();
 
